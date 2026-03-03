@@ -273,6 +273,72 @@ func (b *IdentityProvider) fetchClaims(tokenData map[string]interface{}) (map[st
 		}
 		m["metadata"] = metadata
 
+		// Use email from /user if present
+		if v, exists := data["email"]; exists {
+			if s, ok := v.(string); ok && s != "" {
+				m["email"] = s
+			}
+		}
+
+		// If we don't yet have an email, fetch primary email from /user/emails
+		if _, exists := m["email"]; !exists {
+			emailURL := "https://api.github.com/user/emails"
+			req2, err := http.NewRequest("GET", emailURL, nil)
+			if err == nil {
+				req2.Header.Set("Accept", "application/json")
+				req2.Header.Add("Authorization", "token "+tokenString)
+				resp2, err := cli.Do(req2)
+				if err == nil {
+					body2, _ := ioutil.ReadAll(resp2.Body)
+					resp2.Body.Close()
+
+					var emails []struct {
+						Email      string `json:"email"`
+						Primary    bool   `json:"primary"`
+						Verified   bool   `json:"verified"`
+						Visibility string `json:"visibility,omitempty"`
+					}
+					if err := json.Unmarshal(body2, &emails); err == nil {
+						// Prefer primary+verified, then first verified, then first entry
+						var chosen string
+						var chosenVerified bool
+						for _, e := range emails {
+							if e.Primary && e.Verified {
+								chosen = e.Email
+								chosenVerified = true
+								break
+							}
+						}
+						if chosen == "" {
+							for _, e := range emails {
+								if e.Verified {
+									chosen = e.Email
+									chosenVerified = true
+									break
+								}
+							}
+						}
+						if chosen == "" && len(emails) > 0 {
+							chosen = emails[0].Email
+							chosenVerified = emails[0].Verified
+						}
+						if chosen != "" {
+							m["email"] = chosen
+							if chosenVerified {
+								m["email_verified"] = true
+							}
+						}
+					} else {
+						b.logger.Debug("Failed parsing GitHub emails", zap.Any("body", body2), zap.Error(err))
+					}
+				} else {
+					b.logger.Debug("Failed requesting GitHub emails", zap.Error(err))
+				}
+			} else {
+				b.logger.Debug("Failed creating GitHub emails request", zap.Error(err))
+			}
+		}
+		// If orgs are configured, fetch additional user data from GitHub API
 		if orgURL, exists := data["organizations_url"]; exists && len(b.userOrgFilters) > 0 {
 			params := map[string]interface{}{
 				"url":      orgURL.(string),
